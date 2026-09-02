@@ -36,7 +36,7 @@ perfect-freehand, tldraw and the 1 euro filter paper.
 1. **Capture.** Pointer events with `touch-action: none`, reading
    `getCoalescedEvents()` so all 240 Pencil samples a second are used rather
    than one per frame. Once a pen is seen, fingers are ignored.
-2. **Filter.** Either a light streamline lerp or a 1 euro filter, both on
+2. **Filter.** A light streamline lerp by default, or a 1 euro filter, both on
    position only. Movement under a threshold is discarded as jitter.
 3. **Curve.** Centripetal Catmull-Rom, alpha 0.5, resampled to a vertex every
    1.4 px. The centripetal form is what stops loops and overshoot on unevenly
@@ -64,15 +64,53 @@ Three things, all switchable so you can feel each one:
   otherwise. It lives only on the live layer and is thrown away on the next
   event, so a wrong guess is never committed.
 - **Drawing happens inside the pointer event**, not on the next animation frame.
+  Apple's own advice for UIKit is the opposite, but WebKit dispatches pointer
+  events from a plain main-thread task that is not aligned to the rendering
+  update, so a hop through `requestAnimationFrame` costs up to a full frame and
+  buys nothing, because coalescing already happened upstream.
 
 Measured on a synthetic stroke at 1200 px/s: the ink reaches the pen exactly
 with tip tracking alone, and about 7 px ahead of it with prediction on. Turning
-the smoothing up to a 1 euro filter at 0.4 Hz without tip tracking puts the ink
-7 px behind, which is what "laggy" feels like.
+the smoothing up puts the ink 7 px behind, which is what "laggy" feels like.
+
+Own extrapolation is damped rather than trusted, because an overshoot past the
+nib is the most visible artifact prediction can produce. Measured tail reach
+past the pen:
+
+| situation | ink ahead of the pen |
+| --- | --- |
+| straight, steady | 10 px |
+| sharp direction change | 0 px |
+| pressure collapsing as the pen lifts | 0 px |
+| resuming after a 120 ms stall | 0 px |
 
 Nothing that overlaps the canvas uses a backdrop filter or a large shadow. A
 blurred bar over the drawing area has to be recomposited on every ink repaint,
 and that shows up directly as writing lag.
+
+A stroke is drawn as one clean fill for as long as it is a normal handwriting
+length, and only starts committing in pieces past 300 points. Committing in
+pieces draws every seam twice, and the doubled anti-aliasing makes live ink
+visibly heavier than the same stroke redrawn later. Measured: 61% of inked
+pixels changed on redraw before this, and 0% after, at a cost of under 2 ms per
+event against a 16.7 ms frame.
+
+## On smoothing filters
+
+The app ships a light streamline lerp rather than a 1 euro filter, and the
+measurements are why. On the same curve, with and without hand jitter:
+
+| filter | strays from the real path | jaggedness |
+| --- | --- | --- |
+| streamline 0.2 | 0.1 px clean, 2.7 px jittery | low |
+| 1 euro, 4.7 Hz | 15.6 px clean, 16.1 px jittery | low |
+| none | 3.2 px jittery | high |
+
+The 1 euro filter is genuinely better at rejecting jitter, but it pays for that
+by dragging the line well off the path you actually drew, and it was also
+producing visible kinks where the speed changed. That is the trade the switch
+exists to let you feel. perfect-freehand, tldraw and Excalidraw all ship the
+streamline lerp for the same reason.
 
 ## Presets
 
@@ -80,7 +118,7 @@ and that shows up directly as writing lag.
 | --- | --- | --- | --- |
 | Notability | constant | light | blunt |
 | Notability + pressure | pressure, wide range | light | blunt |
-| GoodNotes fountain | pressure and speed | 1 euro | tapered |
+| GoodNotes fountain | pressure and speed | light | tapered |
 | Apple Notes | pressure, widest range | medium | blunt |
 | Raw input | constant | none | blunt |
 
@@ -109,4 +147,12 @@ node tools/gen-icons.mjs
   speed.
 - `getCoalescedEvents` and `getPredictedEvents` need Safari 18.2 or newer. The
   app detects both and falls back rather than failing.
+- `getCoalescedEvents` also requires a secure context, so opening the dev server
+  over plain http from another device silently drops to one sample per frame.
+  The published HTTPS copy does not have that problem.
+- `desynchronized: true` on a canvas context is deliberately not used. WebKit
+  stores the flag and reports it back as enabled, but acts on it nowhere.
+- Safari 18 and earlier report pointer coordinates as whole CSS pixels;
+  fractional coordinates arrived in Safari 26. On older iPadOS a slow stroke has
+  a 1 px lattice in it, which is part of what the smoothing is absorbing.
 - Settings persist in `localStorage`; the drawing itself is not saved.

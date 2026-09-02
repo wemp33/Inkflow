@@ -272,23 +272,23 @@ const I18N = {
 // toggle Notability offers per pen, kept as its own preset.
 const PRESETS = {
   notability: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 1.0, beta: 0.007, curve: 'catmull', minDist: 1.0,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 1.0,
     baseWidth: 2.2, widthMode: 'fixed', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   notabilityP: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 1.0, beta: 0.007, curve: 'catmull', minDist: 1.0,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 1.0,
     baseWidth: 2.2, widthMode: 'pressure', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   goodnotes: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'oneEuro', streamline: 0.3, minCutoff: 1.0, beta: 0.02, curve: 'catmull', minDist: 1.0,
+    smoothing: 'streamline', streamline: 0.3, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 1.0,
     baseWidth: 2.4, widthMode: 'both', pressureGain: 0.4, velocityThin: 0.55, taper: true, taperLen: 9,
     straighten: false, renderer: 'outline' },
   notes: { coalesced: true, predict: 'auto', predictMs: 10, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.4, minCutoff: 1.0, beta: 0.007, curve: 'catmull', minDist: 1.0,
+    smoothing: 'streamline', streamline: 0.4, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 1.0,
     baseWidth: 2.6, widthMode: 'pressure', pressureGain: 0.75, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: false, renderer: 'outline' },
   raw: { coalesced: true, predict: 'off', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'none', streamline: 0.2, minCutoff: 1.0, beta: 0.007, curve: 'polyline', minDist: 0.5,
+    smoothing: 'none', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'polyline', minDist: 0.5,
     baseWidth: 2.2, widthMode: 'fixed', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: false, renderer: 'segments' },
 };
@@ -420,6 +420,9 @@ Stroke.prototype.finish = function () {
 
 // ============================================================ curve =========
 const STEP = 1.4;   // one densified vertex about every 1.4 px
+// Above this many points a stroke stops being redrawn whole each event and
+// starts committing in pieces, trading a faint seam for bounded per-event cost.
+const LIVE_WHOLE_MAX = 300;
 
 // Turns points i0..i1 into a dense polyline. `extra` is appended after the
 // stroke's own points, which is how the live tip and the predicted tail ride
@@ -568,9 +571,10 @@ function drawWhole(ctx, st) {
 const paper = document.getElementById('paper');
 const inkC = document.getElementById('ink'), tailC = document.getElementById('tail');
 const ink = inkC.getContext('2d');
-// desynchronized lets Safari put the live layer closer to the display and skip
-// a compositing step; it is a hint, and harmless where it is not honoured.
-const tail = tailC.getContext('2d', { desynchronized: true });
+// Deliberately no `desynchronized: true`. WebKit stores the flag, echoes it
+// back from getContextAttributes() and then uses it nowhere, so asking for it
+// buys nothing and leaves a setting that reports itself as working.
+const tail = tailC.getContext('2d');
 let W = 0, H = 0, DPR = 1;
 
 function resize() {
@@ -686,6 +690,10 @@ function endPointer(e) {
 }
 paper.addEventListener('pointerup', endPointer);
 paper.addEventListener('pointercancel', endPointer);
+// WebKit only captures touch pointers implicitly, so a Pencil that leaves the
+// element can take its pointerup with it. Without this the stroke would stay
+// open for ever and the app would quietly refuse to start another one.
+paper.addEventListener('lostpointercapture', endPointer);
 // Safari still tries to scroll, rubber band and double tap zoom from a canvas
 // even with touch-action: none, so the touch events are refused outright.
 for (const ev of ['touchstart', 'touchmove', 'touchend']) paper.addEventListener(ev, e => e.preventDefault(), { passive: false });
@@ -710,15 +718,34 @@ function predictionFor(e, st) {
     stats.pred += out.length;
     return out;
   }
-  const raw = st.raw; if (raw.length < 2) return [];
-  const last = raw[raw.length - 1]; let j = raw.length - 2;
-  while (j > 0 && last.t - raw[j].t < 12) j--;
+  // Own extrapolation, only where the browser offers none. Guessing too
+  // confidently is worse than not guessing: an overshoot past the nib at every
+  // direction change and a hook at every lifted pen is the artifact people see.
+  const raw = st.raw; if (!raw || raw.length < 4) return [];
+  const last = raw[raw.length - 1];
+  if (last.t - raw[raw.length - 2].t > 20) return [];   // a stall: the old velocity means nothing
+  if (st.pen && last.p > 0 && last.p < 0.1) return [];  // the pen is being lifted
+  const at = ms => { let j = raw.length - 1; while (j > 0 && last.t - raw[j].t < ms) j--; return j; };
+  const j = at(12), k = at(26);
   const dt = Math.max(last.t - raw[j].t, 1);
   const vx = (last.x - raw[j].x) / dt, vy = (last.y - raw[j].y) / dt, sp = Math.hypot(vx, vy);
   if (sp < 0.04) return [];
-  const dist = Math.min(sp * S.predictMs * 0.8, 26), out = [];
-  for (let k = 1; k <= 2; k++) { const f = (dist / sp) * k / 2; out.push({ x: last.x + vx * f, y: last.y + vy * f, p: last.p, t: last.t + f / sp }); }
-  stats.pred += 2;
+  // Confidence: how straight the last two windows are. A turn cancels the guess.
+  let conf = 1;
+  if (k < j) {
+    const dt2 = Math.max(raw[j].t - raw[k].t, 1);
+    const ux = (raw[j].x - raw[k].x) / dt2, uy = (raw[j].y - raw[k].y) / dt2, su = Math.hypot(ux, uy);
+    if (su > 1e-4) conf = clamp(((vx * ux + vy * uy) / (sp * su) - 0.5) * 2, 0, 1);
+  }
+  if (conf <= 0.02) return [];
+  const horizon = Math.min(S.predictMs, 25) * conf;
+  const dist = Math.min(sp * horizon, 26), out = [];
+  const steps = clamp(Math.round(dist / 4), 1, 4);
+  for (let n = 1; n <= steps; n++) {
+    const f = (dist / sp) * n / steps;
+    out.push({ x: last.x + vx * f, y: last.y + vy * f, p: last.p, t: last.t + f / sp });
+  }
+  stats.pred += out.length;
   return out;
 }
 
@@ -765,14 +792,26 @@ function flush(final) {
   a.pending.length = 0;
   if (final) st.finish();                    // may append the true lift-off point
   const n = st.pts.length; if (!n) return;
-  const stable = final ? n - 1 : st.stableIndex();
-  if (stable > st.committedTo || (final && st.committedTo === 0)) {
-    const from = Math.max(st.committedTo - 1, 0);
-    drawRange(ink, st, from, stable, st.committedTo === 0, final, null);
-    st.committedTo = stable;
+
+  // Committing a stroke in pieces means every seam is drawn twice, and the
+  // doubled anti-aliasing makes the live ink slightly heavier than the same
+  // stroke redrawn later. A handwritten stroke is a letter or two, so keep it
+  // whole on the live layer and commit it in one clean fill. Only a stroke long
+  // enough for a full redraw to cost real time falls back to piecewise commits.
+  const whole = st.committedTo === 0 && n <= LIVE_WHOLE_MAX;
+  if (!whole) {
+    const stable = final ? n - 1 : st.stableIndex();
+    if (stable > st.committedTo) {
+      drawRange(ink, st, Math.max(st.committedTo - 1, 0), stable, st.committedTo === 0, final, null);
+      st.committedTo = stable;
+    }
   }
   clearTail(st);
-  if (final) { if (st.pts.length) { strokes.push(st); pushAction({ type: 'add', stroke: st, index: strokes.length - 1 }); } return; }
+  if (final) {
+    if (whole) drawWhole(ink, st);
+    strokes.push(st); pushAction({ type: 'add', stroke: st, index: strokes.length - 1 });
+    return;
+  }
 
   // The tail: settled point, then the rest of the filtered curve, then the raw
   // pen position, then the guess. Ending it at the raw position is what keeps
@@ -786,13 +825,13 @@ function flush(final) {
   const tipCount = extra.length;
   if (!st.locked) for (const p of a.pred) extra.push({ x: p.x, y: p.y, w: lastPt.w, d: lastPt.d });
 
-  const from = Math.max(st.committedTo - 1, 0);
+  const from = whole ? 0 : Math.max(st.committedTo - 1, 0);
   let D;
   if (S.showPrediction && extra.length > tipCount) {
-    D = drawRange(tail, st, from, n - 1 + tipCount, st.committedTo === 0, true, extra);
+    D = drawRange(tail, st, from, n - 1 + tipCount, whole || st.committedTo === 0, true, extra);
     D = D.concat(drawRange(tail, st, n - 1 + tipCount, n - 1 + extra.length, false, true, extra, 'rgba(20,108,155,0.55)'));
   } else {
-    D = drawRange(tail, st, from, n - 1 + extra.length, st.committedTo === 0, true, extra);
+    D = drawRange(tail, st, from, n - 1 + extra.length, whole || st.committedTo === 0, true, extra);
   }
   if (!D.length) return;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, r = 0;
@@ -857,8 +896,8 @@ const SCHEMA = [
   { section: 'smoothing', rows: [
     { key: 'smoothing', type: 'select', options: ['none', 'streamline', 'oneEuro'] },
     { key: 'streamline', type: 'range', min: 0, max: 0.9, step: 0.05, showIf: s => s.smoothing === 'streamline' },
-    { key: 'minCutoff', type: 'range', min: 0.2, max: 5, step: 0.1, unit: ' Hz', showIf: s => s.smoothing === 'oneEuro' },
-    { key: 'beta', type: 'range', min: 0, max: 0.06, step: 0.002, showIf: s => s.smoothing === 'oneEuro' },
+    { key: 'minCutoff', type: 'range', min: 0.2, max: 12, step: 0.1, unit: ' Hz', showIf: s => s.smoothing === 'oneEuro' },
+    { key: 'beta', type: 'range', min: 0, max: 0.05, step: 0.001, showIf: s => s.smoothing === 'oneEuro' },
     { key: 'curve', type: 'select', options: ['polyline', 'quadratic', 'catmull'] },
     { key: 'minDist', type: 'range', min: 0, max: 3, step: 0.25, unit: ' px' },
   ] },
