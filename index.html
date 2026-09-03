@@ -187,6 +187,7 @@ const I18N = {
       curve: ['Curve', ''],
       minDist: ['Ignore movement under', ''],
       smoothPx: ['De-stair radius', 'Averages out the whole-pixel lattice Safari reports the pen on'],
+      adaptive: ['Ease off at corners', 'Smooths hard on straight runs, barely at all where the pen turns'],
       baseWidth: ['Width', ''],
       widthMode: ['Width from', ''],
       pressureGain: ['Pressure effect', ''],
@@ -237,6 +238,7 @@ const I18N = {
       curve: ['Krzywa', ''],
       minDist: ['Pomijaj ruch poniżej', ''],
       smoothPx: ['Promień odschodkowania', 'Uśrednia siatkę pełnych pikseli, na której Safari podaje rysik'],
+      adaptive: ['Odpuszczaj na zakrętach', 'Mocno wygładza proste odcinki, prawie wcale tam, gdzie rysik skręca'],
       baseWidth: ['Grubość', ''],
       widthMode: ['Grubość zależna od', ''],
       pressureGain: ['Wpływ nacisku', ''],
@@ -274,23 +276,23 @@ const I18N = {
 // toggle Notability offers per pen, kept as its own preset.
 const PRESETS = {
   notability: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 3.0, adaptive: true,
     baseWidth: 2.2, widthMode: 'fixed', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   notabilityP: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 3.0, adaptive: true,
     baseWidth: 2.2, widthMode: 'pressure', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   goodnotes: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.3, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
+    smoothing: 'streamline', streamline: 0.3, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 3.0, adaptive: true,
     baseWidth: 2.4, widthMode: 'both', pressureGain: 0.4, velocityThin: 0.55, taper: true, taperLen: 9,
     straighten: false, renderer: 'outline' },
   notes: { coalesced: true, predict: 'auto', predictMs: 10, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.4, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
+    smoothing: 'streamline', streamline: 0.4, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 3.0, adaptive: true,
     baseWidth: 2.6, widthMode: 'pressure', pressureGain: 0.75, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: false, renderer: 'outline' },
   raw: { coalesced: true, predict: 'off', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'none', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'polyline', minDist: 0.5, smoothPx: 0,
+    smoothing: 'none', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'polyline', minDist: 0.5, smoothPx: 0, adaptive: false,
     baseWidth: 2.2, widthMode: 'fixed', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: false, renderer: 'segments' },
 };
@@ -307,6 +309,11 @@ const save = () => { try { localStorage.setItem('inkflow.settings', JSON.stringi
 const T = () => I18N[S.lang];
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+// Arc length each side over which the local turn is measured, and the turn at
+// which the de-stair radius has wound all the way down to its floor.
+const CURV_SPAN = 3.0;
+const TURN_FULL = 0.45;
+const SMOOTH_MIN_FRAC = 0.3;
 const smoothstep = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 
 // ========================================================== filter ==========
@@ -400,19 +407,58 @@ Stroke.prototype.add = function (s) {
 // left untouched. Points stop changing once the window has passed them, so
 // nothing that has already been drawn moves.
 Stroke.prototype.smoothTail = function () {
-  const p = this.pts, n = p.length, sig = this.sigma();
-  if (!(sig > 0.05)) { const q = p[n - 1]; q.sx = q.x; q.sy = q.y; return; }
-  const lim = 3 * sig, end = p[n - 1].d, two = 2 * sig * sig;
-  let i = n - 1;
-  while (i > 0 && end - p[i - 1].d < lim) i--;      // everything older has settled
-  for (; i < n; i++) {
-    let wx = 0, wy = 0, ws = 0;
-    for (let j = i; j >= 0; j--) { const d = p[i].d - p[j].d; if (d > lim) break;
-      const w = Math.exp(-d * d / two); wx += p[j].x * w; wy += p[j].y * w; ws += w; }
-    for (let j = i + 1; j < n; j++) { const d = p[j].d - p[i].d; if (d > lim) break;
-      const w = Math.exp(-d * d / two); wx += p[j].x * w; wy += p[j].y * w; ws += w; }
-    p[i].sx = wx / ws; p[i].sy = wy / ws;
+  const p = this.pts, n = p.length, smax = this.sigma();
+  if (!(smax > 0.05)) { const q = p[n - 1]; q.sx = q.x; q.sy = q.y; return; }
+  const settle = this.settleSpan();
+  let i0 = n - 1;
+  while (i0 > 0 && p[n - 1].d - p[i0 - 1].d < settle) i0--;
+
+  // Gaussian along arc length, over the raw path, between two indices.
+  const pass = (from, sigOf, fx, fy, ox, oy) => {
+    for (let i = from; i < n; i++) {
+      const sg = sigOf(i), lim = 3 * sg, two = 2 * sg * sg;
+      let wx = 0, wy = 0, ws = 0;
+      for (let j = i; j >= 0; j--) { const d = p[i].d - p[j].d; if (d > lim) break;
+        const w = Math.exp(-d * d / two); wx += p[j][fx] * w; wy += p[j][fy] * w; ws += w; }
+      for (let j = i + 1; j < n; j++) { const d = p[j].d - p[i].d; if (d > lim) break;
+        const w = Math.exp(-d * d / two); wx += p[j][fx] * w; wy += p[j][fy] * w; ws += w; }
+      p[i][ox] = wx / ws; p[i][oy] = wy / ws;
+    }
+  };
+
+  if (!this.o.adaptive) { pass(i0, () => smax, 'x', 'y', 'sx', 'sy'); return; }
+
+  // Quantising a smooth path to whole pixels leaves collinear runs whose length
+  // depends on the slope: on a shallow, barely-turning run a tread reaches 10 px,
+  // while through a tight curve it is one or two. A single radius therefore has
+  // to choose between leaving the long treads visible and rounding off the
+  // corners. Vary it instead: smooth hard where the path is straight, which is
+  // exactly where there is no corner to lose, and barely at all where it turns.
+  //
+  // The radius is chosen from a first, narrow pass rather than from the output
+  // it controls, so nothing feeds back on itself, and every window is a bounded
+  // distance, so points still settle and committed ink still never moves.
+  const sbase = Math.min(smax, 1.2);
+  pass(i0, () => sbase, 'x', 'y', 'tx', 'ty');
+  for (let i = i0; i < n; i++) {
+    let a = i, b = i;
+    while (a > 0 && p[i].d - p[a - 1].d < CURV_SPAN) a--;
+    while (b < n - 1 && p[b + 1].d - p[i].d < CURV_SPAN) b++;
+    const ux = p[i].tx - p[a].tx, uy = p[i].ty - p[a].ty;
+    const vx = p[b].tx - p[i].tx, vy = p[b].ty - p[i].ty;
+    const l1 = Math.hypot(ux, uy), l2 = Math.hypot(vx, vy);
+    const turn = (l1 > 1e-6 && l2 > 1e-6)
+      ? Math.acos(clamp((ux * vx + uy * vy) / (l1 * l2), -1, 1)) : 0;
+    p[i].sg = smax * (SMOOTH_MIN_FRAC + (1 - SMOOTH_MIN_FRAC) * (1 - smoothstep(turn / TURN_FULL)));
   }
+  pass(i0, i => p[i].sg, 'x', 'y', 'sx', 'sy');
+};
+
+// How far back geometry can still change, so nothing already drawn moves.
+Stroke.prototype.settleSpan = function () {
+  const smax = this.sigma();
+  if (!(smax > 0.05)) return 0;
+  return this.o.adaptive ? 3 * smax + CURV_SPAN + 3 * Math.min(smax, 1.2) : 3 * smax;
 };
 
 Stroke.prototype.width = function (p, d) {
@@ -431,12 +477,13 @@ Stroke.prototype.width = function (p, d) {
 // must stay uncommitted. With no taper this is a couple of pixels.
 Stroke.prototype.holdBack = function () {
   // Clear BOTH things that can still move geometry after it has been drawn:
-  // smoothTail keeps rewriting sx/sy within 3 sigma of the tip, and densify
-  // reads two control points past the end of the range it is asked to draw.
+  // smoothTail keeps rewriting sx/sy within its settle span of the tip, and
+  // densify reads two control points past the end of the range it is given.
   const p = this.pts, n = p.length;
   const span = n >= 3 ? p[n - 1].d - p[n - 3].d : 2;
-  return Math.max(this.o.taper ? this.o.taperLen * 1.3 : 3, 3 * this.sigma() + 1 + span);
+  return Math.max(this.o.taper ? this.o.taperLen * 1.3 : 3, this.settleSpan() + 1 + span);
 };
+
 Stroke.prototype.stableIndex = function () {
   let i = this.pts.length - 2; if (i < 0) return 0;
   const limit = this.len - this.holdBack();
@@ -1042,6 +1089,7 @@ const SCHEMA = [
     { key: 'curve', type: 'select', options: ['polyline', 'quadratic', 'catmull', 'bspline'] },
     { key: 'minDist', type: 'range', min: 0, max: 3, step: 0.05, unit: ' px' },
     { key: 'smoothPx', type: 'range', min: 0, max: 6, step: 0.2, unit: ' px' },
+    { key: 'adaptive', type: 'switch', showIf: s => s.smoothPx > 0 },
   ] },
   { section: 'width', rows: [
     { key: 'baseWidth', type: 'range', min: 0.5, max: 8, step: 0.2, unit: ' px' },

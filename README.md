@@ -41,11 +41,22 @@ perfect-freehand, tldraw and the 1 euro filter paper.
 3. **De-stair.** Safari reports the pen position in whole CSS pixels until
    version 26, so a slowly written curve arrives as a staircase on a 1 px
    lattice. That error sits at the very top of the frequency range the sample
-   spacing can carry, while the shape of a letter sits far below it, so a short
-   Gaussian along the arc length (2 px by default) erases the staircase and
-   leaves the letter alone. This is the difference between curves that look
-   drawn and curves that look polygonal, and no interpolating spline can do it:
-   such a spline is obliged to pass through every jog.
+   spacing can carry, while the shape of a letter sits far below it, so a
+   Gaussian along the arc length erases the staircase and leaves the letter
+   alone. This is the difference between curves that look drawn and curves that
+   look polygonal, and no interpolating spline can do it: such a spline is
+   obliged to pass through every jog.
+
+   The radius **varies with how much the pen is turning**. Quantising to whole
+   pixels leaves collinear runs whose length depends on the slope: measured on a
+   real arc, a tread reaches **11 px** where the path runs shallow and is one or
+   two pixels through a tight curve. One fixed radius therefore has to choose
+   between leaving the long treads visible and rounding the corners off. So it
+   smooths hard where the path is straight, which is exactly where there is no
+   corner to lose, and barely at all where it turns. The radius is chosen from a
+   first narrow pass rather than from the output it controls, so nothing feeds
+   back on itself, and every window is a bounded distance, so points still settle
+   and committed ink still never moves (measured: zero pixels).
 4. **Curve.** A clamped uniform cubic B-spline, resampled to one vertex per
    device pixel, with a second subdivision floor on turn angle so tight bowls
    are not under-sampled. A B-spline *approximates* its control points rather
@@ -153,8 +164,22 @@ on the filled outline, which is what the eye actually sees:
 | tangent measured over a fixed span | 23.2 |
 | plus the de-stair pass | **2.0** |
 
-Measured again on the rendered silhouette, tracing its sub-pixel edge from the
-alpha coverage over 533 columns, which is the least forgiving test available:
+### How far this can go
+
+Measured on the rendered silhouette, tracing its sub-pixel edge from the alpha
+coverage, which is the least forgiving test available. First, the floor — what
+the same measurement gives for shapes that have no input error at all:
+
+| | silhouette wobble (RMS px) |
+| --- | --- |
+| a perfect ribbon filled as one analytic path | 0.059 |
+| an ideal centreline through this outline renderer | 0.076 |
+
+So 0.059 is the rasteriser's own limit and about 0.017 more is the cost of the
+geometry stage. Everything above that is input error, and that is the part worth
+attacking.
+
+Then the pipeline itself:
 
 | | silhouette wobble (RMS px) | worst |
 | --- | --- | --- |
@@ -162,9 +187,21 @@ alpha coverage over 533 columns, which is the least forgiving test available:
 | Catmull-Rom + de-stair 2.0 | 0.196 | 0.86 |
 | **B-spline + de-stair 1.6** | **0.146** | **0.70** |
 
-The B-spline beats the smoothest Catmull-Rom setting while smoothing 20% *less*,
-which is why the de-stair radius came down from 2.0 to 1.6: corners stay
-sharper for a smoother edge.
+The B-spline beats the smoothest Catmull-Rom setting while smoothing 20% *less*.
+
+Making the radius follow the turn beats every fixed radius on both axes at once.
+Measured together with how far a drawn 90 degree corner falls short of the true
+apex:
+
+| | wobble | corner miss |
+| --- | --- | --- |
+| fixed 1.6 | 0.201 | 0.97 px |
+| fixed 4.0 | 0.143 | 2.19 px |
+| **turn-following, 3.0** | **0.146** | **0.62 px** |
+
+It matches the smoothest fixed setting while keeping corners sharper than the
+lightest one, and it cuts the input-induced part of the error by 44%. The
+**Ease off at corners** switch turns it off.
 
 Straying from the true path went *down* too, from 0.74 px to 0.59 px: the
 staircase was itself an error, so removing it moves the ink closer to what was

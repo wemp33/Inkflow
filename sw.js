@@ -1,6 +1,6 @@
 // Stale-while-revalidate over a handful of static files: opens instantly and
 // offline, and picks up a deployed update on the next launch. Bump CACHE to ship.
-var CACHE = 'inkflow-v5';
+var CACHE = 'inkflow-v6';
 var ASSETS = [
   './',
   './index.html',
