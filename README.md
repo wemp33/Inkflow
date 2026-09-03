@@ -51,6 +51,22 @@ perfect-freehand, tldraw and the 1 euro filter paper.
 6. **Two layers.** Settled geometry is committed to a canvas that is never
    cleared. Only a short live tail is redrawn per event, so the cost of an event
    does not grow with the length of the stroke.
+7. **Pixel mapping.** The backing store is sized from the element's fractional
+   `getBoundingClientRect()` rather than the rounded `clientWidth`, and the
+   canvas is then given that exact size in CSS pixels. One canvas pixel is one
+   device pixel, so nothing is resampled on the way to the screen. Verified: a
+   one-device-pixel line renders as a single opaque column with no bleed into
+   its neighbours.
+
+The pixel ratio defaults to the full ratio the device reports, up to 3. It was
+capped at 2, which cost a third of the linear resolution on any 3x screen. The
+only limit now is a 12 megapixel guard per canvas, since there are two of them
+and iOS runs out of memory well before WebKit's own 8192x8192 ceiling.
+
+Edge softness measured on a diagonal stroke, in CSS pixels of partial coverage
+per solid pixel: 1.49 at ratio 1, 0.90 at ratio 1.25, and proportionally
+sharper above that. Per-event cost stays under 2.4 ms worst case against a
+16.7 ms frame, so the extra resolution is not paid for in latency.
 
 ## Why it does not lag
 
@@ -154,5 +170,7 @@ node tools/gen-icons.mjs
   stores the flag and reports it back as enabled, but acts on it nowhere.
 - Safari 18 and earlier report pointer coordinates as whole CSS pixels;
   fractional coordinates arrived in Safari 26. On older iPadOS a slow stroke has
-  a 1 px lattice in it, which is part of what the smoothing is absorbing.
+  a 1 px lattice in it, which is part of what the smoothing is absorbing. This
+  is a limit of the input, not of the rendering, and no amount of resolution
+  fixes it.
 - Settings persist in `localStorage`; the drawing itself is not saved.

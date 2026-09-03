@@ -196,7 +196,7 @@ const I18N = {
       renderer: ['Renderer', ''],
       showPrediction: ['Colour the predicted tail', 'Shows in blue what is a guess'],
       paper: ['Paper', ''],
-      dprCap: ['Max pixel ratio', ''],
+      dprCap: ['Max pixel ratio', 'Device pixels drawn per CSS pixel'],
       lang: ['Language', ''],
     },
     options: {
@@ -245,7 +245,7 @@ const I18N = {
       renderer: ['Renderer', ''],
       showPrediction: ['Koloruj przewidywany ogon', 'Pokazuje na niebiesko to, co jest zgadywane'],
       paper: ['Papier', ''],
-      dprCap: ['Maks. gęstość pikseli', ''],
+      dprCap: ['Maks. gęstość pikseli', 'Pikseli urządzenia na piksel CSS'],
       lang: ['Język', ''],
     },
     options: {
@@ -294,7 +294,7 @@ const PRESETS = {
 };
 const PRESET_KEYS = Object.keys(PRESETS.notability);
 const DEFAULTS = Object.assign(
-  { preset: 'notability', penOnly: false, showPrediction: false, paper: 'blank', dprCap: 2, lang: 'en', stats: false, color: '#1d1a17' },
+  { preset: 'notability', penOnly: false, showPrediction: false, paper: 'blank', dprCap: 3, lang: 'en', stats: false, color: '#1d1a17' },
   PRESETS.notability);
 
 let S = Object.assign({}, DEFAULTS);
@@ -577,15 +577,29 @@ const ink = inkC.getContext('2d');
 const tail = tailC.getContext('2d');
 let W = 0, H = 0, DPR = 1;
 
+// Per canvas. WebKit refuses anything over 8192x8192, but iOS gives up on the
+// memory well before that, and there are two of these.
+const MAX_DEVICE_PX = 12e6;
+
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, S.dprCap);
-  const w = paper.clientWidth, h = paper.clientHeight;
-  if (!w || !h) return;                       // laid out at zero: wait to be told again
-  if (w === W && h === H && dpr === DPR) return;
-  DPR = dpr; W = w; H = h;
+  // getBoundingClientRect, not clientWidth: the latter is rounded to whole
+  // pixels while the element is really laid out at a fractional width, and
+  // sizing the backing store from the rounded figure leaves the browser
+  // rescaling the finished image by a hair, which softens every stroke.
+  const r = paper.getBoundingClientRect();
+  if (!r.width || !r.height) return;           // laid out at zero: wait to be told again
+  let dpr = Math.min(window.devicePixelRatio || 1, S.dprCap);
+  const fits = Math.sqrt(MAX_DEVICE_PX / (r.width * r.height));
+  if (dpr > fits) dpr = fits;
+  const bw = Math.round(r.width * dpr), bh = Math.round(r.height * dpr);
+  if (bw === inkC.width && bh === inkC.height && dpr === DPR) return;
+  DPR = dpr; W = bw / dpr; H = bh / dpr;
   for (const [c, x] of [[inkC, ink], [tailC, tail]]) {
-    c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
-    x.setTransform(DPR, 0, 0, DPR, 0, 0);
+    c.width = bw; c.height = bh;
+    // Pin the displayed size to exactly the pixels that were allocated, so one
+    // canvas pixel is one device pixel and nothing is resampled on the way out.
+    c.style.width = W + 'px'; c.style.height = H + 'px';
+    x.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   renderAll();   // the paper is fixed at the viewport origin, so no rect to refresh
 }
@@ -859,7 +873,7 @@ function tick(now) {
     ];
     const w = Math.max.apply(null, rows.map(r => r[0].length));
     stats.out = rows.map(r => r[0].padEnd(w) + '  ' + r[1]).join('\n') +
-      '\n' + 'dpr'.padEnd(w) + '  ' + DPR + '  ' + (supportsCoalesced ? 'coalesced' : 'no coalesced') + ' ' + (supportsPredicted ? 'predicted' : 'no predicted');
+      '\n' + 'dpr'.padEnd(w) + '  ' + (Math.round(DPR * 100) / 100) + '  ' + (supportsCoalesced ? 'coalesced' : 'no coalesced') + ' ' + (supportsPredicted ? 'predicted' : 'no predicted');
     if (S.stats) statsEl.textContent = stats.out;
     stats.samples = stats.events = stats.pred = stats.hand = stats.handN = stats.age = stats.ageN = stats.frames = 0;
     stats.last = now;
@@ -914,7 +928,7 @@ const SCHEMA = [
     { key: 'straighten', type: 'switch' },
     { key: 'showPrediction', type: 'switch', showIf: s => s.predict !== 'off' },
     { key: 'paper', type: 'select', options: ['blank', 'ruled', 'grid'] },
-    { key: 'dprCap', type: 'select', options: [1, 2, 3] },
+    { key: 'dprCap', type: 'select', options: [1, 2, 3, 4] },
   ] },
   { section: 'app', rows: [ { key: 'lang', type: 'select', options: ['en', 'pl'] } ] },
 ];
