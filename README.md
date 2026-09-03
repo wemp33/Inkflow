@@ -54,9 +54,14 @@ perfect-freehand, tldraw and the 1 euro filter paper.
    between leaving the long treads visible and rounding the corners off. So it
    smooths hard where the path is straight, which is exactly where there is no
    corner to lose, and barely at all where it turns. The radius is chosen from a
-   first narrow pass rather than from the output it controls, so nothing feeds
-   back on itself, and every window is a bounded distance, so points still settle
-   and committed ink still never moves (measured: zero pixels).
+   first pass rather than from the output it controls, so nothing feeds back on
+   itself, and every window is a bounded distance, so points still settle and
+   committed ink still never moves (measured: zero pixels).
+
+   That first pass has to be **wide enough to have erased the lattice itself**,
+   or the gate reads Safari's own staircase as curvature and winds the radius
+   down on exactly the shallow runs where the treads are longest — feeding the
+   law the noise it exists to remove. It runs at 2.0 px.
 4. **Curve.** A clamped uniform cubic B-spline, resampled to one vertex per
    device pixel, with a second subdivision floor on turn angle so tight bowls
    are not under-sampled. A B-spline *approximates* its control points rather
@@ -73,7 +78,12 @@ perfect-freehand, tldraw and the 1 euro filter paper.
    force is discarded because it is unreliable.
 6. **Geometry.** The centreline is offset by half the width on each side and the
    ring is filled, so the edge is one anti-aliased boundary rather than a stack
-   of overlapping round segments. A disc fills the notch at hard corners. The
+   of overlapping round segments. A disc fills the notch at hard corners, in the
+   *same path* as the outline and under one nonzero fill: canvas composites once
+   per drawing operation, so a second fill whose anti-aliased rim crosses the
+   first stacks as 1-(1-a)^2 — half coverage reading as three quarters, a
+   quarter-pixel outward bulge, landing exactly on the hard corners where the
+   worst of the wobble already is. The
    tangent is measured across a fixed 1.1 px of arc rather than between
    neighbouring vertices: those are a device pixel apart, and a central
    difference over them turns a hair of noise into a large error in the normal,

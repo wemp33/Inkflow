@@ -312,6 +312,11 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 // Arc length each side over which the local turn is measured, and the turn at
 // which the de-stair radius has wound all the way down to its floor.
 const CURV_SPAN = 3.0;
+// Radius of the pilot pass the turn is measured on. It has to be wide enough to
+// have erased the lattice itself, or the gate reads Safari's own staircase as
+// curvature and winds the de-stair radius down on exactly the shallow runs
+// where the treads are longest — feeding the law the noise it exists to remove.
+const CURV_PILOT = 2.0;
 const TURN_FULL = 0.45;
 const SMOOTH_MIN_FRAC = 0.3;
 const smoothstep = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
@@ -438,7 +443,7 @@ Stroke.prototype.smoothTail = function () {
   // The radius is chosen from a first, narrow pass rather than from the output
   // it controls, so nothing feeds back on itself, and every window is a bounded
   // distance, so points still settle and committed ink still never moves.
-  const sbase = Math.min(smax, 1.2);
+  const sbase = Math.min(smax, CURV_PILOT);
   pass(i0, () => sbase, 'x', 'y', 'tx', 'ty');
   for (let i = i0; i < n; i++) {
     let a = i, b = i;
@@ -458,7 +463,17 @@ Stroke.prototype.smoothTail = function () {
 Stroke.prototype.settleSpan = function () {
   const smax = this.sigma();
   if (!(smax > 0.05)) return 0;
-  return this.o.adaptive ? 3 * smax + CURV_SPAN + 3 * Math.min(smax, 1.2) : 3 * smax;
+  // The two reaches are concurrent reads, not a chain: the final pass reads the
+  // raw x/y within +-3*smax, and the radius field reads the pilot within
+  // +-CURV_SPAN, which reads the same raw x/y within +-3*sbase. Nothing in here
+  // writes x/y, so the bound is the LARGER reach and never their sum. The +1 is
+  // one sample spacing at the window edge, and it is load-bearing: replaying
+  // point by point reproduces the full-knowledge result exactly with it, and
+  // misses by 1.3e-2 px without it.
+  const reach = this.o.adaptive
+    ? Math.max(3 * smax, CURV_SPAN + 3 * Math.min(smax, CURV_PILOT))
+    : 3 * smax;
+  return reach + 1;
 };
 
 Stroke.prototype.width = function (p, d) {
@@ -507,7 +522,7 @@ Stroke.prototype.finish = function () {
       // the pen was lifted. Ramp the correction back over the window so pinning
       // the end exactly does not leave a kink at the point before it.
       const q = this.pts[this.pts.length - 1];
-      const ex = r.x - q.sx, ey = r.y - q.sy, lim = 3 * this.sigma() || 1;
+      const ex = r.x - q.sx, ey = r.y - q.sy, lim = this.settleSpan() || 1;
       for (let i = this.pts.length - 1; i >= 0; i--) {
         const back = this.len - this.pts[i].d;
         if (back > lim) break;
@@ -649,7 +664,7 @@ function densify(pts, i0, i1, curve, extra) {
 // Offsets the centreline by half the width on each side and fills the ring, so
 // the edge is one anti-aliased boundary rather than a stack of overlapping
 // strokes. Nonzero winding hides the self-intersections tight turns produce.
-function fillOutline(ctx, D, startCap, endCap) {
+function fillOutline(ctx, D, startCap, endCap, discs) {
   const m = D.length; if (!m) return;
   if (m === 1) { ctx.beginPath(); ctx.arc(D[0].x, D[0].y, Math.max(D[0].w / 2, 0.35), 0, 6.2832); ctx.fill(); return; }
   const L = new Float64Array(m * 2), R = new Float64Array(m * 2);
@@ -684,6 +699,29 @@ function fillOutline(ctx, D, startCap, endCap) {
   for (let k = m - 2; k >= 0; k--) ctx.lineTo(R[2 * k], R[2 * k + 1]);
   if (startCap && D[0].w > 0.7) { const a = Math.atan2(n0y, n0x); ctx.arc(D[0].x, D[0].y, D[0].w / 2, a + Math.PI, a, true); }
   ctx.closePath();
+
+  // The hard-corner discs belong in THIS path, not in a second fill(). Canvas
+  // composites once per drawing operation, so two fills whose anti-aliased rims
+  // cross stack as 1-(1-a)^2 — half coverage reads as three quarters, a quarter
+  // of a pixel of outward bulge, landing exactly on the hard corners where the
+  // worst of the wobble already is. One nonzero fill makes the rasteriser
+  // resolve the union to a single exact coverage instead.
+  if (discs && discs.length) {
+    // Nonzero winding unions subpaths only where they wind the same way; a disc
+    // wound against the outline would punch a hole at the corner. Take the
+    // outline's own signed area and match it.
+    let a2 = 0, px = L[0], py = L[1];
+    const acc = (x, y) => { a2 += px * y - x * py; px = x; py = y; };
+    for (let k = 1; k < m; k++) acc(L[2 * k], L[2 * k + 1]);
+    for (let k = m - 1; k >= 0; k--) acc(R[2 * k], R[2 * k + 1]);
+    acc(L[0], L[1]);
+    const back = a2 < 0;                    // a bare arc(0 -> 2pi) winds positive
+    for (let i = 0; i < discs.length; i++) {
+      const d = discs[i];
+      ctx.moveTo(d.x + d.r, d.y);           // start at angle 0, so no stray chord
+      ctx.arc(d.x, d.y, d.r, 0, back ? -6.2832 : 6.2832, back);
+    }
+  }
   ctx.fill();
 }
 
@@ -718,16 +756,18 @@ function drawRange(ctx, st, i0, i1, startCap, endCap, extra, color) {
   if (st.o.renderer === 'segments') strokeSegments(ctx, D);
   else if (st.o.renderer === 'stamps') stampDots(ctx, D);
   else {
-    fillOutline(ctx, D, startCap, endCap);
-    // A hard corner would notch the offset outline; a disc at the vertex fills it.
+    // Gather the hard-corner discs and hand them to fillOutline, so the whole
+    // stroke goes down as one fill and the overlaps are unioned, not blended.
     const n = st.pts.length, N = n + (extra ? extra.length : 0);
     const P = i => (i < n ? st.pts[i] : extra[i - n]);
+    let discs = null;
     for (let i = Math.max(i0, 1); i < Math.min(i1, N - 1); i++) {
       const a = P(i - 1), b = P(i), c = P(i + 1);
       const ux = b.sx - a.sx, uy = b.sy - a.sy, vx = c.sx - b.sx, vy = c.sy - b.sy;
       const l1 = Math.hypot(ux, uy), l2 = Math.hypot(vx, vy); if (l1 < 1e-6 || l2 < 1e-6) continue;
-      if ((ux * vx + uy * vy) / (l1 * l2) < 0.6) { ctx.beginPath(); ctx.arc(b.sx, b.sy, b.w / 2, 0, 6.2832); ctx.fill(); }
+      if ((ux * vx + uy * vy) / (l1 * l2) < 0.6) (discs || (discs = [])).push({ x: b.sx, y: b.sy, r: b.w / 2 });
     }
+    fillOutline(ctx, D, startCap, endCap, discs);
   }
   return D;
 }
