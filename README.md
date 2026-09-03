@@ -38,20 +38,32 @@ perfect-freehand, tldraw and the 1 euro filter paper.
    than one per frame. Once a pen is seen, fingers are ignored.
 2. **Filter.** A light streamline lerp by default, or a 1 euro filter, both on
    position only. Movement under a threshold is discarded as jitter.
-3. **Curve.** Centripetal Catmull-Rom, alpha 0.5, resampled to a vertex every
-   1.4 px. The centripetal form is what stops loops and overshoot on unevenly
-   spaced samples.
-4. **Width.** Constant, or from pressure, or from speed, or both. Pencil force
+3. **De-stair.** Safari reports the pen position in whole CSS pixels until
+   version 26, so a slowly written curve arrives as a staircase on a 1 px
+   lattice. That error sits at the very top of the frequency range the sample
+   spacing can carry, while the shape of a letter sits far below it, so a short
+   Gaussian along the arc length (2 px by default) erases the staircase and
+   leaves the letter alone. This is the difference between curves that look
+   drawn and curves that look polygonal, and no interpolating spline can do it:
+   such a spline is obliged to pass through every jog.
+4. **Curve.** Centripetal Catmull-Rom, alpha 0.5, resampled to one vertex per
+   device pixel. The centripetal form is what stops loops and overshoot on
+   unevenly spaced samples.
+5. **Width.** Constant, or from pressure, or from speed, or both. Pencil force
    is lifted by 1.25, eased, and smoothed by distance travelled rather than by
    time, so a resting pen cannot make the line drift thicker. The first sample's
    force is discarded because it is unreliable.
-5. **Geometry.** The centreline is offset by half the width on each side and the
+6. **Geometry.** The centreline is offset by half the width on each side and the
    ring is filled, so the edge is one anti-aliased boundary rather than a stack
-   of overlapping round segments. A disc fills the notch at hard corners.
-6. **Two layers.** Settled geometry is committed to a canvas that is never
+   of overlapping round segments. A disc fills the notch at hard corners. The
+   tangent is measured across a fixed 1.1 px of arc rather than between
+   neighbouring vertices: those are a device pixel apart, and a central
+   difference over them turns a hair of noise into a large error in the normal,
+   which shows up as a lumpy edge.
+7. **Two layers.** Settled geometry is committed to a canvas that is never
    cleared. Only a short live tail is redrawn per event, so the cost of an event
    does not grow with the length of the stroke.
-7. **Pixel mapping.** The backing store is sized from the element's fractional
+8. **Pixel mapping.** The backing store is sized from the element's fractional
    `getBoundingClientRect()` rather than the rounded `clientWidth`, and the
    canvas is then given that exact size in CSS pixels. One canvas pixel is one
    device pixel, so nothing is resampled on the way to the screen. Verified: a
@@ -110,6 +122,36 @@ pieces draws every seam twice, and the doubled anti-aliasing makes live ink
 visibly heavier than the same stroke redrawn later. Measured: 61% of inked
 pixels changed on redraw before this, and 0% after, at a cost of under 2 ms per
 event against a 16.7 ms frame.
+
+## Why curves used to look polygonal
+
+Handwritten digits came out visibly faceted next to the same digits in
+Notability, on the same iPad. Two compounding causes, both measured on a
+simulated "9" written at 260 px/s with whole-pixel coordinates:
+
+- Any segment shorter than the resampling step was emitted as a single point,
+  which turned it into a straight line. At normal handwriting speed the stored
+  points are about 1.2 px apart, so **85% of segments bypassed the spline
+  altogether**.
+- Catmull-Rom *interpolates*: it passes through every stored point, so it traced
+  the 1 px staircase faithfully. Notability fits Bezier curves, which
+  approximate.
+
+The fix is the de-stair pass plus a minimum of two pieces per segment. Measured
+on the filled outline, which is what the eye actually sees:
+
+| | outline roughness (turn degrees per px) |
+| --- | --- |
+| before | 33.9 |
+| tangent measured over a fixed span | 23.2 |
+| plus the de-stair pass | **2.0** |
+
+Straying from the true path went *down* too, from 0.74 px to 0.59 px: the
+staircase was itself an error, so removing it moves the ink closer to what was
+drawn, not further away. Sharp corners survive — the maximum turn stays above
+130 degrees. Per-event cost is unchanged at 0.7 ms median, 2.7 ms worst.
+
+The radius is the **De-stair radius** slider. Zero reproduces the old behaviour.
 
 ## On smoothing filters
 
