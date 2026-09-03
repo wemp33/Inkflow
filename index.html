@@ -204,7 +204,7 @@ const I18N = {
       predict: { off: 'Off', browser: 'From the browser', own: 'Own extrapolation' },
       drawIn: { event: 'Straight away', raf: 'On the next frame' },
       smoothing: { none: 'None', streamline: 'Streamline', oneEuro: '1 euro filter' },
-      curve: { polyline: 'Straight segments', quadratic: 'Quadratic', catmull: 'Catmull-Rom' },
+      curve: { polyline: 'Straight segments', quadratic: 'Quadratic', catmull: 'Catmull-Rom', bspline: 'B-spline (averaging)' },
       widthMode: { fixed: 'Nothing', pressure: 'Pressure', velocity: 'Speed', both: 'Pressure and speed' },
       renderer: { outline: 'Filled outline', segments: 'Round segments', stamps: 'Stamped dots' },
       paper: { blank: 'Blank', ruled: 'Ruled', grid: 'Grid' },
@@ -254,7 +254,7 @@ const I18N = {
       predict: { off: 'Wył.', browser: 'Z przeglądarki', own: 'Własna ekstrapolacja' },
       drawIn: { event: 'Od razu', raf: 'W następnej klatce' },
       smoothing: { none: 'Brak', streamline: 'Streamline', oneEuro: 'Filtr 1 euro' },
-      curve: { polyline: 'Proste odcinki', quadratic: 'Kwadratowa', catmull: 'Catmull-Rom' },
+      curve: { polyline: 'Proste odcinki', quadratic: 'Kwadratowa', catmull: 'Catmull-Rom', bspline: 'B-sklejana (uśredniająca)' },
       widthMode: { fixed: 'Niczego', pressure: 'Nacisku', velocity: 'Prędkości', both: 'Nacisku i prędkości' },
       renderer: { outline: 'Wypełniony obrys', segments: 'Okrągłe odcinki', stamps: 'Stemplowane kropki' },
       paper: { blank: 'Gładki', ruled: 'W linie', grid: 'W kratkę' },
@@ -274,19 +274,19 @@ const I18N = {
 // toggle Notability offers per pen, kept as its own preset.
 const PRESETS = {
   notability: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 0.35, smoothPx: 2.0,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
     baseWidth: 2.2, widthMode: 'fixed', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   notabilityP: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 0.35, smoothPx: 2.0,
+    smoothing: 'streamline', streamline: 0.2, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
     baseWidth: 2.2, widthMode: 'pressure', pressureGain: 0.62, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: true, renderer: 'outline' },
   goodnotes: { coalesced: true, predict: 'auto', predictMs: 12, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.3, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 0.35, smoothPx: 2.0,
+    smoothing: 'streamline', streamline: 0.3, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
     baseWidth: 2.4, widthMode: 'both', pressureGain: 0.4, velocityThin: 0.55, taper: true, taperLen: 9,
     straighten: false, renderer: 'outline' },
   notes: { coalesced: true, predict: 'auto', predictMs: 10, tipTracks: true, drawIn: 'event',
-    smoothing: 'streamline', streamline: 0.4, minCutoff: 4.7, beta: 0.01, curve: 'catmull', minDist: 0.35, smoothPx: 2.0,
+    smoothing: 'streamline', streamline: 0.4, minCutoff: 4.7, beta: 0.01, curve: 'bspline', minDist: 0.35, smoothPx: 1.6,
     baseWidth: 2.6, widthMode: 'pressure', pressureGain: 0.75, velocityThin: 0.5, taper: false, taperLen: 8,
     straighten: false, renderer: 'outline' },
   raw: { coalesced: true, predict: 'off', predictMs: 12, tipTracks: true, drawIn: 'event',
@@ -352,7 +352,15 @@ Stroke.prototype.pressureOf = function (s, dist) {
   return (this.p = this.sim);
 };
 
+// Safari reports the pen on a whole-CSS-pixel lattice until version 26. That
+// lattice is the whole reason the de-stair pass exists, so the moment a
+// fractional coordinate turns up, back the smoothing off rather than carry on
+// rounding the letters. Feature-detected from the samples, never from the UA.
+let subPixelInput = false;
+Stroke.prototype.sigma = function () { return this.o.smoothPx * (subPixelInput ? 0.35 : 1); };
+
 Stroke.prototype.add = function (s) {
+  if (!subPixelInput && s.cx !== undefined && ((s.cx % 1) || (s.cy % 1))) subPixelInput = true;
   const raw = this.raw, prev = raw.length ? raw[raw.length - 1] : null;
   raw.push(s);
   if (prev) {
@@ -392,7 +400,7 @@ Stroke.prototype.add = function (s) {
 // left untouched. Points stop changing once the window has passed them, so
 // nothing that has already been drawn moves.
 Stroke.prototype.smoothTail = function () {
-  const p = this.pts, n = p.length, sig = this.o.smoothPx;
+  const p = this.pts, n = p.length, sig = this.sigma();
   if (!(sig > 0.05)) { const q = p[n - 1]; q.sx = q.x; q.sy = q.y; return; }
   const lim = 3 * sig, end = p[n - 1].d, two = 2 * sig * sig;
   let i = n - 1;
@@ -422,9 +430,12 @@ Stroke.prototype.width = function (p, d) {
 // The end taper is only known once the stroke ends, so that much of the tail
 // must stay uncommitted. With no taper this is a couple of pixels.
 Stroke.prototype.holdBack = function () {
-  // Past the taper, and past the smoothing window, or committed geometry would
-  // still be moving after it was drawn.
-  return Math.max(this.o.taper ? this.o.taperLen * 1.3 : 3, 3 * this.o.smoothPx + 1);
+  // Clear BOTH things that can still move geometry after it has been drawn:
+  // smoothTail keeps rewriting sx/sy within 3 sigma of the tip, and densify
+  // reads two control points past the end of the range it is asked to draw.
+  const p = this.pts, n = p.length;
+  const span = n >= 3 ? p[n - 1].d - p[n - 3].d : 2;
+  return Math.max(this.o.taper ? this.o.taperLen * 1.3 : 3, 3 * this.sigma() + 1 + span);
 };
 Stroke.prototype.stableIndex = function () {
   let i = this.pts.length - 2; if (i < 0) return 0;
@@ -440,7 +451,23 @@ Stroke.prototype.finish = function () {
   const r = this.raw && this.raw.length ? this.raw[this.raw.length - 1] : null, last = n ? this.pts[n - 1] : null;
   if (r && last && !this.locked) {
     const d = Math.hypot(r.x - last.x, r.y - last.y);
-    if (d > 0.4) { this.len += d; this.pts.push({ x: r.x, y: r.y, sx: r.x, sy: r.y, w: last.w, d: this.len }); this.smoothTail(); }
+    if (d > 0.4) {
+      this.len += d;
+      this.pts.push({ x: r.x, y: r.y, sx: r.x, sy: r.y, w: last.w, d: this.len });
+      this.smoothTail();
+      // smoothTail rewrites sx/sy across the whole trailing window, including
+      // the point just pinned, so without this the stroke stops short of where
+      // the pen was lifted. Ramp the correction back over the window so pinning
+      // the end exactly does not leave a kink at the point before it.
+      const q = this.pts[this.pts.length - 1];
+      const ex = r.x - q.sx, ey = r.y - q.sy, lim = 3 * this.sigma() || 1;
+      for (let i = this.pts.length - 1; i >= 0; i--) {
+        const back = this.len - this.pts[i].d;
+        if (back > lim) break;
+        const f = 1 - back / lim;
+        this.pts[i].sx += ex * f; this.pts[i].sy += ey * f;
+      }
+    }
   }
   const m = this.pts.length;
   if (o.taper && o.taperLen > 0 && this.len > o.taperLen * 2) {
@@ -498,6 +525,45 @@ function densify(pts, i0, i1, curve, extra) {
     }
     const e = node(i1); out.push({ x: e[0], y: e[1], w: e[2] });
     if (i1 === N - 1) { const p = P(i1); out.push({ x: p.sx, y: p.sy, w: p.w }); }
+    return out;
+  }
+  if (curve === 'bspline') {
+    // Uniform cubic B-spline. Unlike Catmull-Rom it does NOT pass through its
+    // control points, so whatever of Safari's 1 px lattice survives the
+    // de-stair pass is averaged ([1,4,1]/6 at a knot, noise gain 0.707) rather
+    // than reproduced faithfully. Its support is the same four points as
+    // Catmull-Rom, so it costs no extra lookahead and holdBack is unchanged.
+    //
+    // Both ends carry multiplicity three, which clamps the curve to P(i0) and
+    // P(i1). That is load-bearing, not cosmetic: P(i1) is the raw pointer
+    // position on the live tail, and the drawn tip has to land exactly on it.
+    const M = (i1 - i0) + 5;
+    const C = j => P(j <= 2 ? i0 : (j >= M - 3 ? i1 : i0 + j - 2));
+    for (let j = 1; j <= M - 3; j++) {
+      const p0 = C(j - 1), p1 = C(j), p2 = C(j + 1), p3 = C(j + 2);
+      const q1x = (p0.sx + 4 * p1.sx + p2.sx) / 6, q1y = (p0.sy + 4 * p1.sy + p2.sy) / 6;
+      const q2x = (p1.sx + 4 * p2.sx + p3.sx) / 6, q2y = (p1.sy + 4 * p2.sy + p3.sy) / 6;
+      const len = Math.hypot(q2x - q1x, q2y - q1y);
+      // B'(0) = (P2-P0)/2 and B'(1) = (P3-P1)/2, so this is the exact turn
+      // across the span rather than a guess from the control polygon.
+      const ax = p2.sx - p0.sx, ay = p2.sy - p0.sy;
+      const bx = p3.sx - p1.sx, by = p3.sy - p1.sy;
+      const turn = Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by));
+      // Two floors, never one. Chord length alone leaves the bowl of a 6 or a 9
+      // faceted where the curve is tight but short; turn alone leaves a long
+      // straight span under-sampled. The floor of two stays: dropping it to one
+      // is what made every short segment a straight line in the first place.
+      const m = clamp(Math.max(Math.ceil(len / step), Math.ceil(turn / 0.06)), 2, 48);
+      for (let k = 0; k < m; k++) {
+        const t = k / m, t2 = t * t, t3 = t2 * t;
+        const b0 = (1 - 3 * t + 3 * t2 - t3) / 6, b1 = (4 - 6 * t2 + 3 * t3) / 6,
+              b2 = (1 + 3 * t + 3 * t2 - 3 * t3) / 6, b3 = t3 / 6;
+        out.push({ x: b0 * p0.sx + b1 * p1.sx + b2 * p2.sx + b3 * p3.sx,
+                   y: b0 * p0.sy + b1 * p1.sy + b2 * p2.sy + b3 * p3.sy,
+                   w: b0 * p0.w + b1 * p1.w + b2 * p2.w + b3 * p3.w });
+      }
+    }
+    const e = P(i1); out.push({ x: e.sx, y: e.sy, w: e.w });
     return out;
   }
   // Centripetal Catmull-Rom, alpha 0.5: passes through every point without the
@@ -715,7 +781,8 @@ const stats = { samples: 0, events: 0, pred: 0, hand: 0, handN: 0, age: 0, ageN:
 
 let rect = null;
 const refreshRect = () => { rect = paper.getBoundingClientRect(); };
-const toLocal = e => ({ x: e.clientX - rect.left, y: e.clientY - rect.top, p: e.pressure, t: e.timeStamp });
+const toLocal = e => ({ x: e.clientX - rect.left, y: e.clientY - rect.top,
+                        cx: e.clientX, cy: e.clientY, p: e.pressure, t: e.timeStamp });
 const strokeOptions = () => { const o = {}; for (const k of PRESET_KEYS) o[k] = S[k]; return o; };
 
 paper.addEventListener('pointerdown', e => {
@@ -900,8 +967,10 @@ function flush(final) {
   const from = whole ? 0 : Math.max(st.committedTo - 1, 0);
   let D;
   if (S.showPrediction && extra.length > tipCount) {
-    D = drawRange(tail, st, from, n - 1 + tipCount, whole || st.committedTo === 0, true, extra);
-    D = D.concat(drawRange(tail, st, n - 1 + tipCount, n - 1 + extra.length, false, true, extra, 'rgba(20,108,155,0.55)'));
+    // Prediction first, opaque ink over it: the two ranges share a round cap
+    // at their boundary and translucent ink would otherwise bead there.
+    const Dp = drawRange(tail, st, n - 1 + tipCount, n - 1 + extra.length, false, true, extra, 'rgba(20,108,155,0.55)');
+    D = drawRange(tail, st, from, n - 1 + tipCount, whole || st.committedTo === 0, true, extra).concat(Dp);
   } else {
     D = drawRange(tail, st, from, n - 1 + extra.length, whole || st.committedTo === 0, true, extra);
   }
@@ -970,7 +1039,7 @@ const SCHEMA = [
     { key: 'streamline', type: 'range', min: 0, max: 0.9, step: 0.05, showIf: s => s.smoothing === 'streamline' },
     { key: 'minCutoff', type: 'range', min: 0.2, max: 12, step: 0.1, unit: ' Hz', showIf: s => s.smoothing === 'oneEuro' },
     { key: 'beta', type: 'range', min: 0, max: 0.05, step: 0.001, showIf: s => s.smoothing === 'oneEuro' },
-    { key: 'curve', type: 'select', options: ['polyline', 'quadratic', 'catmull'] },
+    { key: 'curve', type: 'select', options: ['polyline', 'quadratic', 'catmull', 'bspline'] },
     { key: 'minDist', type: 'range', min: 0, max: 3, step: 0.05, unit: ' px' },
     { key: 'smoothPx', type: 'range', min: 0, max: 6, step: 0.2, unit: ' px' },
   ] },

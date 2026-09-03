@@ -46,9 +46,16 @@ perfect-freehand, tldraw and the 1 euro filter paper.
    leaves the letter alone. This is the difference between curves that look
    drawn and curves that look polygonal, and no interpolating spline can do it:
    such a spline is obliged to pass through every jog.
-4. **Curve.** Centripetal Catmull-Rom, alpha 0.5, resampled to one vertex per
-   device pixel. The centripetal form is what stops loops and overshoot on
-   unevenly spaced samples.
+4. **Curve.** A clamped uniform cubic B-spline, resampled to one vertex per
+   device pixel, with a second subdivision floor on turn angle so tight bowls
+   are not under-sampled. A B-spline *approximates* its control points rather
+   than passing through them (noise gain 0.707 at a knot against Catmull-Rom's
+   1.000), so whatever staircase survives stage 3 is averaged again rather than
+   reproduced. Its support is the same four points as Catmull-Rom, so it costs
+   no extra lookahead. Both ends carry multiplicity three, which clamps the
+   curve to its endpoints: the last control point is the raw pointer position,
+   and the drawn tip has to land exactly on it. Centripetal Catmull-Rom is
+   still available in the settings.
 5. **Width.** Constant, or from pressure, or from speed, or both. Pencil force
    is lifted by 1.25, eased, and smoothed by distance travelled rather than by
    time, so a resting pen cannot make the line drift thicker. The first sample's
@@ -146,12 +153,37 @@ on the filled outline, which is what the eye actually sees:
 | tangent measured over a fixed span | 23.2 |
 | plus the de-stair pass | **2.0** |
 
+Measured again on the rendered silhouette, tracing its sub-pixel edge from the
+alpha coverage over 533 columns, which is the least forgiving test available:
+
+| | silhouette wobble (RMS px) | worst |
+| --- | --- | --- |
+| Catmull-Rom, no de-stair | 0.326 | 2.28 |
+| Catmull-Rom + de-stair 2.0 | 0.196 | 0.86 |
+| **B-spline + de-stair 1.6** | **0.146** | **0.70** |
+
+The B-spline beats the smoothest Catmull-Rom setting while smoothing 20% *less*,
+which is why the de-stair radius came down from 2.0 to 1.6: corners stay
+sharper for a smoother edge.
+
 Straying from the true path went *down* too, from 0.74 px to 0.59 px: the
 staircase was itself an error, so removing it moves the ink closer to what was
 drawn, not further away. Sharp corners survive — the maximum turn stays above
 130 degrees. Per-event cost is unchanged at 0.7 ms median, 2.7 ms worst.
 
 The radius is the **De-stair radius** slider. Zero reproduces the old behaviour.
+
+Safari 26 reports fractional coordinates, at which point there is no lattice to
+undo and this would be pure over-smoothing. The app watches the samples for a
+fractional coordinate and, when one appears, cuts the radius to a third for the
+rest of the session. Feature-detected from the input, never from the user agent.
+
+**What was tried and rejected:** replacing the offset outline with the union of
+the discs along the centreline, which is tangent-continuous by construction and
+needs no normals at all. It measured no smoother and cost 29 ms per event
+against a 16.7 ms frame, because canvas cannot rasterise a thousand convex
+subpaths cheaply. The offset polygon with a fixed-span tangent is both faster
+and, once the centreline is smooth, better.
 
 ## On smoothing filters
 
